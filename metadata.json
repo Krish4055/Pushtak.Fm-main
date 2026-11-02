@@ -1,0 +1,6 @@
+{
+  "name": "Pushtak.fm",
+  "description": "A calm, premium 'listen to anything' platform powered by Gnani AI (Timbre v2.5 TTS, Prisma v2.5 STT, Evon v3.3 LLM) for students, commuters, and book lovers.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
