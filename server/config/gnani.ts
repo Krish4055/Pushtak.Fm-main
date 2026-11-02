@@ -8,10 +8,13 @@
  * - LLM: Gemini 3.8 Flash for Q&A, summarization, and study packs
  */
 
+import dotenv from 'dotenv';
+dotenv.config();
+
 export interface GnaniConfig {
-  apiKey: string;
+  readonly apiKey: string;
   tts: {
-    endpoint: string;
+    readonly endpoint: string;
     model: string;
     defaultVoice: string;
     defaultLanguage: string;
@@ -28,7 +31,7 @@ export interface GnaniConfig {
     maxRetries: number;
   };
   stt: {
-    endpoint: string;
+    readonly endpoint: string;
     model: string;
     languageCode: string;
     maxDurationSeconds: number; // 30 seconds max
@@ -38,10 +41,14 @@ export interface GnaniConfig {
 }
 
 export const GNANI_CONFIG: GnaniConfig = {
-  apiKey: process.env.GNANI_API_KEY || '',
+  get apiKey() {
+    return process.env.GNANI_API_KEY || '';
+  },
 
   tts: {
-    endpoint: process.env.GNANI_TTS_ENDPOINT || 'https://api.vachana.ai/api/v1/tts/inference',
+    get endpoint() {
+      return process.env.GNANI_TTS_ENDPOINT || 'https://api.vachana.ai/api/v1/tts/inference';
+    },
     model: 'timbre-v3.0',
     defaultVoice: 'Lakshmi',
     defaultLanguage: 'auto',
@@ -59,7 +66,9 @@ export const GNANI_CONFIG: GnaniConfig = {
   },
 
   stt: {
-    endpoint: process.env.GNANI_STT_ENDPOINT || 'https://api.vachana.ai/stt/v3',
+    get endpoint() {
+      return process.env.GNANI_STT_ENDPOINT || 'https://api.vachana.ai/stt/v3';
+    },
     model: 'prisma-v3.0',
     languageCode: 'indic-auto',
     maxDurationSeconds: 30,
