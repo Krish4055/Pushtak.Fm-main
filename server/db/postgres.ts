@@ -264,3 +264,4 @@ export async function getStudyPackFromDB(sectionId: string): Promise<StudyPack |
   if (res.rows.length === 0) return null;
   return res.rows[0].pack;
 }
+
