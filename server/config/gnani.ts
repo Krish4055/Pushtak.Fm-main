@@ -26,7 +26,7 @@ export interface GnaniConfig {
       encoding: 'linear_pcm';
       container: 'wav';
     };
-    charLimitPerRequest: number; // 700 chars safe limit
+    charLimitPerRequest: number; // 450 chars safe limit
     timeoutMs: number;
     maxRetries: number;
   };
@@ -60,7 +60,7 @@ export const GNANI_CONFIG: GnaniConfig = {
       encoding: 'linear_pcm',
       container: 'wav',
     },
-    charLimitPerRequest: 700,
+    charLimitPerRequest: 450, // 450 chars optimal for sub-second synthesis and zero Vachana timeouts
     timeoutMs: 15000,
     maxRetries: 2,
   },

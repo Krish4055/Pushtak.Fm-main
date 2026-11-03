@@ -151,6 +151,8 @@ class AudioPlayerService {
   private preloadedSectionIds: Set<string> = new Set();
   private hasPreloadedNextForCurrentTrack: boolean = false;
   private isPreloadInFlight: boolean = false;
+  private isPlayingFirstChunkOnly: boolean = false;
+  private fullSectionBlobPromise: Promise<Blob | null> | null = null;
 
   // Sleep timer
   private sleepTimerId: any = null;
@@ -444,8 +446,43 @@ class AudioPlayerService {
       }
 
       if (!audioBlob) {
-        // Request synthesized continuous WAV from backend
-        console.log(`[AudioPlayer] Synthesizing continuous audio for "${section.title}" (Voice: ${this.voice})...`);
+        // 1. Kick off full section synthesis in background for gapless continuity
+        this.fullSectionBlobPromise = (async () => {
+          try {
+            const fullResp = await fetch('/api/tts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                text: section.text,
+                language: book.language,
+                voice: this.voice,
+                speed: this.playbackRate,
+                sectionId: section.id,
+              }),
+            });
+            if (fullResp.ok) {
+              const fullBlob = await fullResp.blob();
+              await saveCachedAudio({
+                cacheKey,
+                sectionId: section.id,
+                blob: fullBlob,
+                mimeType: fullResp.headers.get('content-type') || 'audio/wav',
+                durationEstimateSeconds: section.estimatedDurationSeconds,
+                speed: this.playbackRate,
+                voice: this.voice,
+                language: book.language,
+              });
+              this.preloadedBlobs.set(section.id, fullBlob);
+              return fullBlob;
+            }
+          } catch (e) {
+            console.warn('[AudioPlayer] Background full synthesis failed:', e);
+          }
+          return null;
+        })();
+
+        // 2. Fast-path: Synthesize chunk 1 for instant (< 1.5s) playback start
+        console.log(`[AudioPlayer] Synthesizing instant start for "${section.title}" (Voice: ${this.voice})...`);
         let resp = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -455,6 +492,7 @@ class AudioPlayerService {
             voice: this.voice,
             speed: this.playbackRate,
             sectionId: section.id,
+            firstChunkOnly: true,
           }),
         });
 
@@ -470,29 +508,37 @@ class AudioPlayerService {
               voice: DEFAULT_VOICE_ID,
               speed: this.playbackRate,
               sectionId: section.id,
+              firstChunkOnly: true,
             }),
           });
         }
 
         const contentType = resp.headers.get('content-type') || '';
         const voiceEngineHeader = resp.headers.get('x-voice-engine') || 'Gnani Timbre v3.0';
+        const totalChunksHeader = resp.headers.get('x-total-chunks') || '1';
+        const isFirstChunk = resp.headers.get('x-first-chunk') === 'true';
+        this.isPlayingFirstChunkOnly = isFirstChunk && totalChunksHeader !== '1';
+
         this.activeEngine = voiceEngineHeader;
         this.events.onEngineChange?.(this.activeEngine);
 
         if (resp.ok && (contentType.includes('audio') || contentType.includes('octet-stream'))) {
           audioBlob = await resp.blob();
 
-          // Save to IndexedDB
-          await saveCachedAudio({
-            cacheKey,
-            sectionId: section.id,
-            blob: audioBlob,
-            mimeType: contentType,
-            durationEstimateSeconds: section.estimatedDurationSeconds,
-            speed: this.playbackRate,
-            voice: this.voice,
-            language: book.language,
-          });
+          if (!this.isPlayingFirstChunkOnly) {
+            // Save full single-chunk audio directly
+            await saveCachedAudio({
+              cacheKey,
+              sectionId: section.id,
+              blob: audioBlob,
+              mimeType: contentType,
+              durationEstimateSeconds: section.estimatedDurationSeconds,
+              speed: this.playbackRate,
+              voice: this.voice,
+              language: book.language,
+            });
+            this.preloadedBlobs.set(section.id, audioBlob);
+          }
         } else {
           // Server signaled browser speech fallback
           const data = await resp.json().catch(() => null);
@@ -503,6 +549,8 @@ class AudioPlayerService {
           this.playWithSpeechSynthesis(section, startSentenceIndex);
           return;
         }
+      } else {
+        this.isPlayingFirstChunkOnly = false;
       }
 
       // Play audio blob with the ONE persistent HTMLAudioElement
@@ -674,7 +722,16 @@ class AudioPlayerService {
     }
   }
 
-  public seekTo(targetSeconds: number) {
+  public async seekTo(targetSeconds: number) {
+    if (this.isPlayingFirstChunkOnly && this.currentSection) {
+      const fullBlob = this.preloadedBlobs.get(this.currentSection.id) || (await this.fullSectionBlobPromise);
+      if (fullBlob && this.audio) {
+        this.isPlayingFirstChunkOnly = false;
+        const fullUrl = URL.createObjectURL(fullBlob);
+        this.audio.src = fullUrl;
+        this.audio.playbackRate = this.playbackRate;
+      }
+    }
     if (this.audio && this.audio.duration) {
       const clamped = Math.max(0, Math.min(this.audio.duration, targetSeconds));
       this.audio.currentTime = clamped;
@@ -790,8 +847,23 @@ class AudioPlayerService {
   /**
    * Track ended handler: Seamlessly transition to preloaded next section
    */
-  private handleTrackEnded() {
+  private async handleTrackEnded() {
     if (!this.currentBook || !this.currentSection) return;
+
+    // If we just finished chunk 1 of a multi-chunk section, continue seamlessly with full audio
+    if (this.isPlayingFirstChunkOnly && this.currentSection) {
+      this.isPlayingFirstChunkOnly = false;
+      const fullBlob = this.preloadedBlobs.get(this.currentSection.id) || (await this.fullSectionBlobPromise);
+      if (fullBlob && this.audio) {
+        const chunk1Elapsed = this.audio.currentTime || 0;
+        const fullUrl = URL.createObjectURL(fullBlob);
+        this.audio.src = fullUrl;
+        this.audio.playbackRate = this.playbackRate;
+        this.audio.currentTime = chunk1Elapsed;
+        this.audio.play().catch(console.error);
+        return;
+      }
+    }
 
     this.events.onSectionComplete?.(this.currentSection);
 
@@ -874,7 +946,7 @@ class AudioPlayerService {
 
   private releaseWakeLock() {
     if (this.wakeLockSentinel) {
-      this.wakeLockSentinel.release().catch(() => {});
+      this.wakeLockSentinel.release().catch(() => { });
       this.wakeLockSentinel = null;
     }
   }

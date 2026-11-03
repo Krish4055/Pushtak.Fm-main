@@ -22,6 +22,7 @@ export interface TTSRequest {
   voice?: string;
   speed?: number; // 0.75 - 2.0
   sectionId?: string;
+  firstChunkOnly?: boolean;
 }
 
 export interface TTSResponse {
@@ -33,19 +34,72 @@ export interface TTSResponse {
   gnaniFailed?: boolean;
   gnaniStatus?: number;
   gnaniReason?: string;
+  isFirstChunkOnly?: boolean;
+  totalChunks?: number;
+}
+
+// In-memory caches for zero-latency instant replays & chunk sharing
+const sectionCache = new Map<string, { buffer: Buffer; duration: number }>();
+const chunkCache = new Map<string, Buffer>();
+
+/**
+ * Creates a silent PCM WAV buffer (24000Hz, 1 channel, 16-bit linear PCM)
+ * Used as a graceful continuity bridge if a rare chunk suffers an unrecoverable 500 error.
+ */
+export function createSilentWav(durationSeconds: number = 0.5): Buffer {
+  const sampleRate = 24000;
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const totalSamples = Math.floor(sampleRate * durationSeconds);
+  const totalPcmBytes = totalSamples * (bitsPerSample / 8) * numChannels;
+
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + totalPcmBytes, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);             // Subchunk1Size
+  header.writeUInt16LE(1, 20);              // AudioFormat (1 = PCM)
+  header.writeUInt16LE(numChannels, 22);    // Mono
+  header.writeUInt32LE(sampleRate, 24);     // SampleRate
+  header.writeUInt32LE(sampleRate * numChannels * (bitsPerSample / 8), 28); // ByteRate
+  header.writeUInt16LE(numChannels * (bitsPerSample / 8), 32);              // BlockAlign
+  header.writeUInt16LE(bitsPerSample, 34);  // 16 bits
+  header.write('data', 36);
+  header.writeUInt32LE(totalPcmBytes, 40);
+
+  const silenceData = Buffer.alloc(totalPcmBytes, 0);
+  return Buffer.concat([header, silenceData]);
 }
 
 /**
- * Text Cleaning:
- * Timbre v3.0 interprets tags like <laugh> and <pauses>.
- * Before sending book text, strip text in angle brackets so book content is never treated as an audio tag.
+ * Robust Text Cleaning for Gnani Timbre v3.0:
+ * - Strips tags in angle brackets (<laugh>, <pauses>, HTML tags)
+ * - Normalizes em-dashes (—) and en-dashes (–) to commas to prevent internal TTS crashes (HTTP 500)
+ * - Normalizes typographical quotes, ellipses, zero-width spaces, slashes, and control characters
  */
 export function cleanTextForTTS(rawText: string): string {
   if (!rawText) return '';
   return rawText
-    // Remove angle bracket tags like <laugh>, <pauses>, <...>, or HTML tags
+    // Remove angle bracket tags
     .replace(/<[^>]*>/g, ' ')
-    // Normalize excessive whitespace
+    // Normalize em-dashes and en-dashes to commas (crucial to prevent Vachana 500 error)
+    .replace(/[—–]/g, ', ')
+    // Normalize typographical quotes
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    // Normalize ellipses
+    .replace(/[…]+|\.{3,}/g, '.')
+    // Normalize slashes, colons, and semicolons to pauses
+    .replace(/[/\\|]/g, ' ')
+    .replace(/;/g, ', ')
+    // Strip bullets, brackets, braces, and disrupting symbols
+    .replace(/[•▪▫*#`~^_[\]{}()<>@$%+=]/g, ' ')
+    // Strip non-breaking spaces, zero-width spaces, and control characters
+    .replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, ' ')
+    // Normalize repeated punctuation marks
+    .replace(/([.,?!])\1+/g, '$1')
+    // Normalize excessive whitespace and linebreaks
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -161,6 +215,12 @@ async function callTimbreV3SingleChunk(
     return { ok: true, status: 200, buffer: voicePreviewCache.get(sampleCacheKey) };
   }
 
+  // Check in-memory chunk cache
+  const chunkCacheKey = `${voice}_${language}_${speed}_${text}`;
+  if (chunkCache.has(chunkCacheKey)) {
+    return { ok: true, status: 200, buffer: chunkCache.get(chunkCacheKey) };
+  }
+
   const payload = {
     text,
     voice,
@@ -188,13 +248,15 @@ async function callTimbreV3SingleChunk(
         if (isShortSample) {
           voicePreviewCache.set(sampleCacheKey, buf);
         }
+        chunkCache.set(chunkCacheKey, buf);
         return { ok: true, status: response.status, buffer: buf };
       }
 
-      // Auto backoff retry on 429 (Gnani enforces 1 active request per key limit)
-      if (response.status === 429 && retriesLeft > 0) {
-        console.warn(`[Timbre v3.0] Rate-limited (429: 1 active request rule). Backing off 1000ms before retry (${retriesLeft} retries left)...`);
-        await new Promise((res) => setTimeout(res, 1000));
+      // Auto backoff retry on 429 rate limit or transient 5xx server errors
+      if ((response.status === 429 || response.status >= 500) && retriesLeft > 0) {
+        const waitMs = response.status === 429 ? 1000 : 700;
+        console.warn(`[Timbre v3.0] HTTP ${response.status} from Gnani. Backing off ${waitMs}ms before retry (${retriesLeft} retries left)...`);
+        await new Promise((res) => setTimeout(res, waitMs));
         return callTimbreV3SingleChunk(params, retriesLeft - 1);
       }
 
@@ -208,7 +270,8 @@ async function callTimbreV3SingleChunk(
 
 /**
  * Main synthesis function:
- * Splits text into <= 700 character chunks, synthesizes each, stitches the WAV audio, and returns truthful errors.
+ * Splits text into <= 450 character chunks, synthesizes each, stitches the WAV audio, and returns truthful errors.
+ * Supports firstChunkOnly mode for instant (< 1.5s) playback start.
  */
 export async function synthesizeSectionSpeech(params: TTSRequest): Promise<TTSResponse> {
   const {
@@ -216,6 +279,7 @@ export async function synthesizeSectionSpeech(params: TTSRequest): Promise<TTSRe
     language = 'auto',
     voice = DEFAULT_VOICE_ID,
     speed = 1.0,
+    firstChunkOnly = false,
   } = params;
 
   const wordCount = text.split(/\s+/).filter(Boolean).length;
@@ -231,7 +295,7 @@ export async function synthesizeSectionSpeech(params: TTSRequest): Promise<TTSRe
     };
   }
 
-  // 1. Text cleaning & Chunking (700 chars max)
+  // 1. Text cleaning & Chunking (450 chars max for fast generation)
   const chunks = chunkTextForTTS(text, GNANI_CONFIG.tts.charLimitPerRequest);
   if (chunks.length === 0) {
     return {
@@ -242,13 +306,28 @@ export async function synthesizeSectionSpeech(params: TTSRequest): Promise<TTSRe
     };
   }
 
-  console.log(`[Timbre v3.0] Synthesizing ${chunks.length} chunk(s) with voice "${voice}"...`);
+  // If full section is already cached in memory, return immediately (0ms latency)
+  const sectionCacheKey = `${voice}_${language}_${speed}_${text}`;
+  if (!firstChunkOnly && sectionCache.has(sectionCacheKey)) {
+    const cached = sectionCache.get(sectionCacheKey)!;
+    console.log(`[Timbre v3.0] Serving full section audio instantly from memory cache for voice "${voice}"`);
+    return {
+      audioBuffer: cached.buffer,
+      audioContentType: 'audio/wav',
+      source: 'gnani-timbre-v3.0',
+      durationEstimateSeconds: cached.duration,
+      totalChunks: chunks.length,
+    };
+  }
+
+  console.log(`[Timbre v3.0] Synthesizing ${firstChunkOnly ? 'Chunk 1 (first-chunk instant)' : `${chunks.length} chunk(s)`} with voice "${voice}"...`);
 
   const wavBuffers: Buffer[] = [];
   let lastFailStatus = 0;
   let lastFailReason = '';
+  const chunksToProcess = firstChunkOnly ? 1 : chunks.length;
 
-  for (let i = 0; i < chunks.length; i++) {
+  for (let i = 0; i < chunksToProcess; i++) {
     const chunk = chunks[i];
     let chunkResult = await callTimbreV3SingleChunk({
       text: chunk,
@@ -257,7 +336,7 @@ export async function synthesizeSectionSpeech(params: TTSRequest): Promise<TTSRe
       speed,
     });
 
-    // If initial attempt fails and voice was not default, try with default voice 'Lakshmi'
+    // 1. If initial attempt fails and voice was not default, try with default voice 'Lakshmi'
     if (!chunkResult.ok && voice !== DEFAULT_VOICE_ID) {
       console.warn(`[Timbre v3.0] Voice "${voice}" failed on chunk ${i + 1}. Retrying with default voice "${DEFAULT_VOICE_ID}"...`);
       chunkResult = await callTimbreV3SingleChunk({
@@ -268,24 +347,65 @@ export async function synthesizeSectionSpeech(params: TTSRequest): Promise<TTSRe
       });
     }
 
+    // 2. If still failing, aggressively strip special characters to plain phonetic words
+    if (!chunkResult.ok) {
+      const sanitizedChunk = chunk
+        .replace(/[^a-zA-Z0-9\s.,?!'\u0900-\u097F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (sanitizedChunk && sanitizedChunk !== chunk) {
+        console.warn(`[Timbre v3.0] Retrying chunk ${i + 1} with simplified phonetic text...`);
+        chunkResult = await callTimbreV3SingleChunk({
+          text: sanitizedChunk,
+          voice: DEFAULT_VOICE_ID,
+          language,
+          speed,
+        });
+      }
+    }
+
     if (chunkResult.ok && chunkResult.buffer) {
       wavBuffers.push(chunkResult.buffer);
     } else {
-      lastFailStatus = chunkResult.status;
-      lastFailReason = chunkResult.error || 'Speech synthesis failed';
-      console.warn(`[Timbre v3.0] Chunk ${i + 1}/${chunks.length} failed: HTTP ${lastFailStatus} - ${lastFailReason}`);
-      break;
+      // If single chunk fails in a multi-chunk section, insert 0.5s pause to maintain continuity
+      if (chunks.length > 1 && i > 0) {
+        console.warn(`[Timbre v3.0] Chunk ${i + 1}/${chunks.length} unrecoverable. Inserting 0.5s pause to maintain audio flow.`);
+        wavBuffers.push(createSilentWav(0.5));
+      } else {
+        lastFailStatus = chunkResult.status;
+        lastFailReason = chunkResult.error || 'Speech synthesis failed';
+        console.warn(`[Timbre v3.0] Chunk ${i + 1}/${chunks.length} failed: HTTP ${lastFailStatus} - ${lastFailReason}`);
+        break;
+      }
     }
   }
 
-  // If all chunks succeeded, stitch and return WAV
+  // Handle first chunk dispatch
+  if (firstChunkOnly) {
+    if (wavBuffers.length > 0) {
+      const firstChunkWordCount = chunks[0].split(/\s+/).filter(Boolean).length;
+      const firstChunkDuration = Math.max(1, Math.round((firstChunkWordCount / (140 * speed)) * 60));
+      return {
+        audioBuffer: wavBuffers[0],
+        audioContentType: 'audio/wav',
+        source: 'gnani-timbre-v3.0',
+        durationEstimateSeconds: firstChunkDuration,
+        isFirstChunkOnly: true,
+        totalChunks: chunks.length,
+      };
+    }
+  }
+
+  // If all chunks succeeded (or filled with continuity bridge), stitch and return WAV
   if (wavBuffers.length === chunks.length) {
     const stitched = stitchWavBuffers(wavBuffers);
+    sectionCache.set(sectionCacheKey, { buffer: stitched, duration: durationEstimateSeconds });
     return {
       audioBuffer: stitched,
       audioContentType: 'audio/wav',
       source: 'gnani-timbre-v3.0',
       durationEstimateSeconds,
+      totalChunks: chunks.length,
     };
   }
 

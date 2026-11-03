@@ -268,7 +268,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
 // Timbre v3.0 TTS Endpoint
 app.post('/api/tts', async (req: Request, res: Response) => {
   try {
-    const { text, language, voice, speed, sectionId } = req.body;
+    const { text, language, voice, speed, sectionId, firstChunkOnly } = req.body;
 
     if (!text || !text.trim()) {
       return res.status(400).json({ error: 'Text is required for TTS synthesis.' });
@@ -280,12 +280,19 @@ app.post('/api/tts', async (req: Request, res: Response) => {
       voice: voice || getDefaultVoiceId(),
       speed: parseFloat(speed) || 1.0,
       sectionId,
+      firstChunkOnly: Boolean(firstChunkOnly),
     });
 
     if (result.audioBuffer) {
       res.setHeader('Content-Type', result.audioContentType);
       res.setHeader('X-Voice-Engine', result.source);
       res.setHeader('X-Estimated-Duration', result.durationEstimateSeconds.toString());
+      if (result.isFirstChunkOnly) {
+        res.setHeader('X-First-Chunk', 'true');
+      }
+      if (result.totalChunks !== undefined) {
+        res.setHeader('X-Total-Chunks', result.totalChunks.toString());
+      }
       res.setHeader('Cache-Control', 'public, max-age=86400');
       return res.send(result.audioBuffer);
     }
