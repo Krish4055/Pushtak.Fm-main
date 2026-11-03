@@ -370,7 +370,7 @@ app.post('/api/ask', async (req: Request, res: Response) => {
 });
 
 // Student Study Pack (Recap, Quiz, Flashcards, Hinglish Explanation)
-app.post('/api/study-pack', async (req: Request, res: Response) => {
+const handleStudyPackRequest = async (req: Request, res: Response) => {
   try {
     const { sectionTitle, sectionText, language } = req.body;
 
@@ -389,7 +389,11 @@ app.post('/api/study-pack', async (req: Request, res: Response) => {
     console.error('[Study Pack] Error:', err);
     res.status(500).json({ error: err.message || 'Failed to generate study pack' });
   }
-});
+};
+
+// Aliased on both /api/study-pack and /api/student/study-pack for full client compatibility
+app.post('/api/study-pack', handleStudyPackRequest);
+app.post('/api/student/study-pack', handleStudyPackRequest);
 
 // --- SERVER SETUP (Vite middleware in dev, dist in prod) ---
 async function startServer() {

@@ -149,6 +149,8 @@ class AudioPlayerService {
   // Next section preloaded audio cache
   private preloadedBlobs = new Map<string, Blob>();
   private preloadedSectionIds: Set<string> = new Set();
+  private hasPreloadedNextForCurrentTrack: boolean = false;
+  private isPreloadInFlight: boolean = false;
 
   // Sleep timer
   private sleepTimerId: any = null;
@@ -219,6 +221,19 @@ class AudioPlayerService {
       // Throttle setPositionState to ~once every 1 second
       if (Math.abs(currentTime - this.lastPositionStateTime) >= 1.0) {
         this.updateMediaSessionPositionState(currentTime, duration);
+      }
+
+      // Preload next section once current track is well underway (>= 20s or 25% progress)
+      // to avoid overlapping TTS requests and 429 rate limits
+      if (
+        duration > 0 &&
+        (currentTime >= 20 || currentTime / duration >= 0.25) &&
+        !this.hasPreloadedNextForCurrentTrack
+      ) {
+        this.hasPreloadedNextForCurrentTrack = true;
+        if (this.currentBook && this.currentSection) {
+          this.preloadNextSection(this.currentBook, this.currentSection);
+        }
       }
     });
 
@@ -486,13 +501,13 @@ class AudioPlayerService {
           this.events.onEngineChange?.(this.activeEngine);
           this.events.onError?.(fallbackMsg);
           this.playWithSpeechSynthesis(section, startSentenceIndex);
-          this.preloadNextSection(book, section);
           return;
         }
       }
 
       // Play audio blob with the ONE persistent HTMLAudioElement
       if (this.audio && audioBlob) {
+        this.hasPreloadedNextForCurrentTrack = false;
         const audioUrl = URL.createObjectURL(audioBlob);
         this.audio.src = audioUrl;
         this.audio.playbackRate = this.playbackRate;
@@ -508,9 +523,6 @@ class AudioPlayerService {
         await this.audio.play();
         this.setStatus('playing');
         this.persistProgress();
-
-        // Background pre-generate and join the NEXT section
-        this.preloadNextSection(book, section);
       }
     } catch (err: any) {
       console.warn('[AudioPlayer] Audio playback error:', err);
@@ -526,12 +538,14 @@ class AudioPlayerService {
    * Pre-generate and join the NEXT section in the background so track transitions are instant
    */
   public async preloadNextSection(book: ParsedBook, currentSection: BookSection) {
+    if (this.isPreloadInFlight) return;
     const nextSectionIndex = currentSection.sectionIndex + 1;
     if (nextSectionIndex >= book.sections.length) return;
 
     const nextSection = book.sections[nextSectionIndex];
     if (this.preloadedSectionIds.has(nextSection.id)) return;
     this.preloadedSectionIds.add(nextSection.id);
+    this.isPreloadInFlight = true;
 
     try {
       const nextCacheKey = await computeAudioCacheKey(
@@ -581,6 +595,8 @@ class AudioPlayerService {
       }
     } catch (err) {
       console.warn('[AudioPlayer] Background preload of next section failed (non-critical):', err);
+    } finally {
+      this.isPreloadInFlight = false;
     }
   }
 

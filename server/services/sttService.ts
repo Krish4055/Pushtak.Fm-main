@@ -13,6 +13,7 @@
 
 import { GNANI_CONFIG, isGnaniConfigured, isGeminiConfigured } from '../config/gnani.js';
 import { GoogleGenAI } from '@google/genai';
+import { gnaniQueue } from './gnaniQueue.js';
 
 export interface STTRequest {
   audioBuffer: Buffer;
@@ -55,13 +56,15 @@ export async function transcribeAudio(params: STTRequest): Promise<STTResponse> 
       formData.append('model', GNANI_CONFIG.stt.model); // "prisma-v3.0"
       formData.append('language_code', language || 'indic-auto'); // "indic-auto"
 
-      const response = await fetch(GNANI_CONFIG.stt.endpoint, {
-        method: 'POST',
-        headers: {
-          'X-API-Key-ID': GNANI_CONFIG.apiKey,
-        },
-        body: formData,
-        signal: AbortSignal.timeout(GNANI_CONFIG.stt.timeoutMs),
+      const response = await gnaniQueue.enqueue(async () => {
+        return fetch(GNANI_CONFIG.stt.endpoint, {
+          method: 'POST',
+          headers: {
+            'X-API-Key-ID': GNANI_CONFIG.apiKey,
+          },
+          body: formData,
+          signal: AbortSignal.timeout(GNANI_CONFIG.stt.timeoutMs),
+        });
       });
 
       if (response.ok) {

@@ -100,7 +100,7 @@ export const StudentModeModal: React.FC<StudentModeModalProps> = ({
       }
 
       // 2. Request generation from backend Evon v3.3
-      const resp = await fetch('/api/student/study-pack', {
+      const resp = await fetch('/api/study-pack', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

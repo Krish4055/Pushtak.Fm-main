@@ -104,7 +104,7 @@ export const StudentView: React.FC<StudentViewProps> = ({
         return;
       }
 
-      const resp = await fetch('/api/student/study-pack', {
+      const resp = await fetch('/api/study-pack', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

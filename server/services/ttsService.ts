@@ -14,6 +14,7 @@
 
 import { GNANI_CONFIG, isGnaniConfigured } from '../config/gnani.js';
 import { DEFAULT_VOICE_ID } from '../config/voices.config.js';
+import { gnaniQueue, voicePreviewCache } from './gnaniQueue.js';
 
 export interface TTSRequest {
   text: string;
@@ -139,7 +140,8 @@ export function stitchWavBuffers(wavBuffers: Buffer[]): Buffer {
 }
 
 /**
- * Synthesizes a single chunk with Gnani Timbre v3.0, with automatic backoff retry on HTTP 429
+ * Synthesizes a single chunk with Gnani Timbre v3.0, routed through global GnaniQueue
+ * to strictly prevent concurrent requests and HTTP 429 rate limits.
  */
 async function callTimbreV3SingleChunk(
   params: {
@@ -148,9 +150,16 @@ async function callTimbreV3SingleChunk(
     language: string;
     speed: number;
   },
-  retriesLeft: number = 2
+  retriesLeft: number = 3
 ): Promise<{ ok: boolean; status: number; buffer?: Buffer; error?: string }> {
   const { text, voice, language, speed } = params;
+
+  // Static preview cache for sample sentences to avoid calling API
+  const isShortSample = text.length < 160;
+  const sampleCacheKey = `${voice}_${language}_${speed}_${text}`;
+  if (isShortSample && voicePreviewCache.has(sampleCacheKey)) {
+    return { ok: true, status: 200, buffer: voicePreviewCache.get(sampleCacheKey) };
+  }
 
   const payload = {
     text,
@@ -161,34 +170,40 @@ async function callTimbreV3SingleChunk(
     audio_config: GNANI_CONFIG.tts.audioConfig,
   };
 
-  try {
-    const response = await fetch(GNANI_CONFIG.tts.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key-ID': GNANI_CONFIG.apiKey,
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(GNANI_CONFIG.tts.timeoutMs),
-    });
+  return gnaniQueue.enqueue(async () => {
+    try {
+      const response = await fetch(GNANI_CONFIG.tts.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key-ID': GNANI_CONFIG.apiKey,
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(GNANI_CONFIG.tts.timeoutMs),
+      });
 
-    if (response.ok) {
-      const arrayBuffer = await response.arrayBuffer();
-      return { ok: true, status: response.status, buffer: Buffer.from(arrayBuffer) };
+      if (response.ok) {
+        const arrayBuffer = await response.arrayBuffer();
+        const buf = Buffer.from(arrayBuffer);
+        if (isShortSample) {
+          voicePreviewCache.set(sampleCacheKey, buf);
+        }
+        return { ok: true, status: response.status, buffer: buf };
+      }
+
+      // Auto backoff retry on 429 (Gnani enforces 1 active request per key limit)
+      if (response.status === 429 && retriesLeft > 0) {
+        console.warn(`[Timbre v3.0] Rate-limited (429: 1 active request rule). Backing off 1000ms before retry (${retriesLeft} retries left)...`);
+        await new Promise((res) => setTimeout(res, 1000));
+        return callTimbreV3SingleChunk(params, retriesLeft - 1);
+      }
+
+      const errText = await response.text();
+      return { ok: false, status: response.status, error: errText || response.statusText };
+    } catch (err: any) {
+      return { ok: false, status: 0, error: err.message || 'Network request failed' };
     }
-
-    // Auto backoff retry on 429 (Gnani enforces 1 active request per key limit)
-    if (response.status === 429 && retriesLeft > 0) {
-      console.warn(`[Timbre v3.0] Rate-limited (429: 1 active request rule). Backing off 700ms before retry (${retriesLeft} retries left)...`);
-      await new Promise((res) => setTimeout(res, 700));
-      return callTimbreV3SingleChunk(params, retriesLeft - 1);
-    }
-
-    const errText = await response.text();
-    return { ok: false, status: response.status, error: errText || response.statusText };
-  } catch (err: any) {
-    return { ok: false, status: 0, error: err.message || 'Network request failed' };
-  }
+  });
 }
 
 /**
