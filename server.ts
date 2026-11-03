@@ -158,6 +158,9 @@ app.get('/api/diagnostics', async (req: Request, res: Response) => {
     result.tts.error = err.message || 'TTS diagnostic network error';
   }
 
+  // Grace pause (350ms) to respect Gnani 1-active-request constraint
+  await new Promise((r) => setTimeout(r, 350));
+
   // 2. Diagnostic STT call with tiny generated WAV
   try {
     const tinyWav = createTinyDiagnosticWav();
@@ -238,16 +241,24 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
 
     const parsedBook = processBookText(title, rawText, targetMinutes, author);
 
-    // Index chunks for RAG in Gemini Book Companion
-    const bookChunks: BookChunk[] = [];
-    for (const section of parsedBook.sections) {
-      const chunks = chunkSection(section.id, section.title, section.chapterTitle, section.text);
-      bookChunks.push(...chunks);
-    }
-    bookChunksStore.set(parsedBook.id, bookChunks);
-
-    console.log(`[Upload] Book parsed: "${parsedBook.title}" - ${parsedBook.sections.length} sections, ${parsedBook.totalWords} words.`);
+    // Return parsed book immediately to client to minimize upload wait time
     res.json(parsedBook);
+    console.log(`[Upload] Book parsed: "${parsedBook.title}" - ${parsedBook.sections.length} sections, ${parsedBook.totalWords} words.`);
+
+    // Index chunks for RAG asynchronously in background without blocking response
+    setImmediate(() => {
+      try {
+        const bookChunks: BookChunk[] = [];
+        for (const section of parsedBook.sections) {
+          const chunks = chunkSection(section.id, section.title, section.chapterTitle, section.text);
+          bookChunks.push(...chunks);
+        }
+        bookChunksStore.set(parsedBook.id, bookChunks);
+        console.log(`[RAG Indexer] Indexed ${bookChunks.length} chunks for "${parsedBook.title}" (${parsedBook.id}) in background.`);
+      } catch (ragErr) {
+        console.error('[RAG Indexer] Background indexing error:', ragErr);
+      }
+    });
   } catch (error: any) {
     console.error('[Upload] Error processing book:', error);
     res.status(500).json({ error: error.message || 'Failed to parse book file.' });

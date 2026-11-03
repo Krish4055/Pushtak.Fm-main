@@ -13,6 +13,7 @@ import {
   Bookmark,
   List,
   Volume2,
+  Download,
 } from 'lucide-react';
 import { ParsedBook, BookSection } from '../../types';
 import { audioPlayer, PlaybackStatus } from '../../services/audioPlayer';
@@ -64,6 +65,19 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
   const [bookmarkUserNote, setBookmarkUserNote] = useState('');
   const [bookmarkTimestamp, setBookmarkTimestamp] = useState(0);
   const [bookmarkSentenceIndex, setBookmarkSentenceIndex] = useState(0);
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  const handleDownloadAudio = async () => {
+    setIsDownloading(true);
+    showToast('Preparing chapter audio for download...', 'info');
+    const res = await audioPlayer.downloadCurrentSectionAudio();
+    setIsDownloading(false);
+    if (res.success) {
+      showToast(`Downloaded: ${res.filename}`, 'success');
+    } else {
+      showToast(res.error || 'Failed to download audio.', 'error');
+    }
+  };
 
   const speeds = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
   const sleepOptions = [
@@ -463,6 +477,19 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
               <span className="font-ui">Voice: {currentVoiceName || 'Lakshmi'}</span>
             </button>
           )}
+
+          {/* Download Audio Button for Offline Commutes */}
+          <button
+            onClick={handleDownloadAudio}
+            disabled={isDownloading}
+            className={`p-2.5 rounded-xl border border-[var(--border-subtle)] tap-target flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[#C2562F] transition shrink-0 ${
+              isDownloading ? 'opacity-50 animate-pulse' : ''
+            }`}
+            title="Download chapter audio for offline commute"
+            aria-label="Download chapter audio"
+          >
+            <Download className="w-4 h-4" />
+          </button>
 
           {/* Clearly Labelled "Ask a question" Button */}
           <button

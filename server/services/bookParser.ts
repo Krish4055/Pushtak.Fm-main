@@ -118,32 +118,95 @@ const COVER_GRADIENTS = [
   'from-zinc-900 via-neutral-900 to-stone-900',
 ];
 
+export interface TokenizedSentence {
+  text: string;
+  wordCount: number;
+}
+
+/**
+ * Fast, deterministic O(N) sentence tokenizer that avoids regex backtracking on large documents.
+ * Computes word counts in the same pass to eliminate redundant .split(/\s+/) calls.
+ */
+export function splitIntoSentencesWithCounts(text: string): TokenizedSentence[] {
+  if (!text) return [];
+
+  const sentences: TokenizedSentence[] = [];
+  const len = text.length;
+  let start = 0;
+  let inWhitespace = true;
+  let wordCount = 0;
+
+  for (let i = 0; i < len; i++) {
+    const ch = text.charCodeAt(i);
+    const isWs = ch === 32 || ch === 9 || ch === 10 || ch === 13; // space, tab, newline, cr
+
+    if (isWs) {
+      inWhitespace = true;
+    } else {
+      if (inWhitespace) {
+        wordCount++;
+        inWhitespace = false;
+      }
+    }
+
+    // Check sentence terminators: . (46), ! (33), ? (63), । (Devanagari danda), or double newline (\n\n)
+    const isTerminator = ch === 46 || ch === 33 || ch === 63 || text[i] === '।';
+    const isDoubleNewline = ch === 10 && i + 1 < len && text.charCodeAt(i + 1) === 10;
+
+    if (isTerminator || isDoubleNewline) {
+      // Decimal lookahead: e.g. 3.14
+      if (ch === 46 && i + 1 < len && text.charCodeAt(i + 1) >= 48 && text.charCodeAt(i + 1) <= 57) {
+        continue;
+      }
+      // Common abbreviation lookahead: Mr. Dr. etc.
+      if (ch === 46) {
+        const prevWordStart = text.lastIndexOf(' ', i - 1);
+        const prefix = text.substring(prevWordStart === -1 ? start : prevWordStart + 1, i).toLowerCase();
+        if (
+          prefix === 'mr' ||
+          prefix === 'mrs' ||
+          prefix === 'ms' ||
+          prefix === 'dr' ||
+          prefix === 'prof' ||
+          prefix === 'vs' ||
+          prefix === 'etc' ||
+          prefix === 'eg' ||
+          prefix === 'ie'
+        ) {
+          continue;
+        }
+      }
+
+      const end = isDoubleNewline ? i : i + 1;
+      const sentenceText = text.substring(start, end).trim();
+      if (sentenceText.length > 0 && wordCount > 0) {
+        sentences.push({ text: sentenceText, wordCount });
+      }
+      start = isDoubleNewline ? i + 2 : i + 1;
+      wordCount = 0;
+      inWhitespace = true;
+    }
+  }
+
+  // Trailing sentence
+  if (start < len) {
+    const sentenceText = text.substring(start).trim();
+    if (sentenceText.length > 0) {
+      const remainingWords = sentenceText.split(/\s+/).filter(Boolean).length;
+      if (remainingWords > 0) {
+        sentences.push({ text: sentenceText, wordCount: remainingWords });
+      }
+    }
+  }
+
+  return sentences.length > 0 ? sentences : [{ text: text.trim(), wordCount: Math.max(1, wordCount) }];
+}
+
 /**
  * Split a block of text into distinct sentences without breaking initials or abbreviations
  */
 export function splitIntoSentences(text: string): string[] {
-  if (!text) return [];
-
-  // Clean strange linebreaks but preserve paragraphs
-  const normalized = text
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(/\t/g, ' ')
-    .replace(/ +/g, ' ');
-
-  // Match sentences ending with . ! ? or Hindi purna viram (।)
-  // Avoid splitting common abbreviations like Mr. Dr. etc. where possible
-  const rawSentences = normalized.match(/[^.!?।\n]+[.!?।]+(?:\s+|$)|[^.!?।\n]+(?:\n+|$)/gu) || [normalized];
-
-  const cleaned: string[] = [];
-  for (const s of rawSentences) {
-    const trimmed = s.trim();
-    if (trimmed.length > 0) {
-      cleaned.push(trimmed);
-    }
-  }
-
-  return cleaned.length > 0 ? cleaned : [normalized.trim()];
+  return splitIntoSentencesWithCounts(text).map((s) => s.text);
 }
 
 /**
@@ -264,33 +327,31 @@ export function processBookText(
   let totalBookWords = 0;
 
   rawChapters.forEach((rawChap, chapIdx) => {
-    const chapterSentences = splitIntoSentences(rawChap.content);
+    const chapterSentences = splitIntoSentencesWithCounts(rawChap.content);
     const chapterSections: BookSection[] = [];
-    let currentSectionSentences: string[] = [];
+    let currentSectionSentences: TokenizedSentence[] = [];
     let currentSectionWords = 0;
     let subSectionNum = 1;
 
     const flushSection = () => {
       if (currentSectionSentences.length === 0) return;
 
-      const sectionText = currentSectionSentences.join(' ');
-      const words = sectionText.split(/\s+/).filter(Boolean);
-      const sectionWordCount = words.length;
+      const sectionText = currentSectionSentences.map((s) => s.text).join(' ');
+      const sectionWordCount = currentSectionWords;
       totalBookWords += sectionWordCount;
 
-      const durationSec = Math.round((sectionWordCount / wordsPerMinute) * 60);
+      const durationSec = Math.max(1, Math.round((sectionWordCount / wordsPerMinute) * 60));
 
       // Build sentence items with word indices
       let wordCursor = 0;
       const sentenceItems: SentenceItem[] = currentSectionSentences.map((sent, sIdx) => {
-        const sWords = sent.split(/\s+/).filter(Boolean).length;
         const item: SentenceItem = {
           id: `sec-${globalSectionIndex}-sent-${sIdx}`,
-          text: sent,
-          wordCount: sWords,
+          text: sent.text,
+          wordCount: sent.wordCount,
           startWordIndex: wordCursor,
         };
-        wordCursor += sWords;
+        wordCursor += sent.wordCount;
         return item;
       });
 
@@ -321,15 +382,13 @@ export function processBookText(
     };
 
     for (const sentence of chapterSentences) {
-      const sentenceWords = sentence.split(/\s+/).filter(Boolean).length;
-
       // If adding this sentence exceeds targetWordsPerSection and we already have substantial text
-      if (currentSectionWords > 0 && currentSectionWords + sentenceWords > targetWordsPerSection * 1.15) {
+      if (currentSectionWords > 0 && currentSectionWords + sentence.wordCount > targetWordsPerSection * 1.15) {
         flushSection();
       }
 
       currentSectionSentences.push(sentence);
-      currentSectionWords += sentenceWords;
+      currentSectionWords += sentence.wordCount;
 
       // If we crossed target words, we can cleanly cut here on this sentence boundary!
       if (currentSectionWords >= targetWordsPerSection) {

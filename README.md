@@ -3,6 +3,7 @@
 > **A calm, high-performance "Listen to Anything" audio platform and Progressive Web Application (PWA).** Turn any 500-page book, academic textbook, PDF, DOCX, TXT file, or syllabus into structured, human-like audio chapters that never cut mid-sentence.
 
 
+
 [![Node.js](https://img.shields.io/badge/Node.js-22.x-339933?logo=node.js)](https://nodejs.org/)
 [![React](https://img.shields.io/badge/React-19.0-61DAFB?logo=react)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript)](https://www.typescriptlang.org/)

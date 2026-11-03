@@ -139,14 +139,17 @@ export function stitchWavBuffers(wavBuffers: Buffer[]): Buffer {
 }
 
 /**
- * Synthesizes a single chunk with Gnani Timbre v3.0
+ * Synthesizes a single chunk with Gnani Timbre v3.0, with automatic backoff retry on HTTP 429
  */
-async function callTimbreV3SingleChunk(params: {
-  text: string;
-  voice: string;
-  language: string;
-  speed: number;
-}): Promise<{ ok: boolean; status: number; buffer?: Buffer; error?: string }> {
+async function callTimbreV3SingleChunk(
+  params: {
+    text: string;
+    voice: string;
+    language: string;
+    speed: number;
+  },
+  retriesLeft: number = 2
+): Promise<{ ok: boolean; status: number; buffer?: Buffer; error?: string }> {
   const { text, voice, language, speed } = params;
 
   const payload = {
@@ -172,10 +175,17 @@ async function callTimbreV3SingleChunk(params: {
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer();
       return { ok: true, status: response.status, buffer: Buffer.from(arrayBuffer) };
-    } else {
-      const errText = await response.text();
-      return { ok: false, status: response.status, error: errText || response.statusText };
     }
+
+    // Auto backoff retry on 429 (Gnani enforces 1 active request per key limit)
+    if (response.status === 429 && retriesLeft > 0) {
+      console.warn(`[Timbre v3.0] Rate-limited (429: 1 active request rule). Backing off 700ms before retry (${retriesLeft} retries left)...`);
+      await new Promise((res) => setTimeout(res, 700));
+      return callTimbreV3SingleChunk(params, retriesLeft - 1);
+    }
+
+    const errText = await response.text();
+    return { ok: false, status: response.status, error: errText || response.statusText };
   } catch (err: any) {
     return { ok: false, status: 0, error: err.message || 'Network request failed' };
   }
@@ -234,7 +244,7 @@ export async function synthesizeSectionSpeech(params: TTSRequest): Promise<TTSRe
 
     // If initial attempt fails and voice was not default, try with default voice 'Lakshmi'
     if (!chunkResult.ok && voice !== DEFAULT_VOICE_ID) {
-      console.warn(`[Timbre v3.0] Voice "${voice}" failed (HTTP ${chunkResult.status}). Retrying with default voice "${DEFAULT_VOICE_ID}"...`);
+      console.warn(`[Timbre v3.0] Voice "${voice}" failed on chunk ${i + 1}. Retrying with default voice "${DEFAULT_VOICE_ID}"...`);
       chunkResult = await callTimbreV3SingleChunk({
         text: chunk,
         voice: DEFAULT_VOICE_ID,

@@ -49,6 +49,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
     text: string;
     author: string;
   } | null>(null);
+  const [cachedInitialBook, setCachedInitialBook] = useState<ParsedBook | null>(null);
 
   const [selectedMinutes, setSelectedMinutes] = useState<number>(10);
 
@@ -89,7 +90,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
     try {
       const formData = new FormData();
       formData.append('file', file);
-      formData.append('targetMinutes', '10');
+      formData.append('targetMinutes', selectedMinutes.toString());
 
       setProgressPercent(60);
       setProgressStage('Extracting text and chapters...');
@@ -105,6 +106,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
       }
 
       const book: ParsedBook = await resp.json();
+      setCachedInitialBook(book);
 
       setProgressPercent(100);
       setExtractedData({
@@ -123,6 +125,18 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const handleConfirmSectionLength = async () => {
     if (!extractedData) return;
     setIsProcessing(true);
+
+    // Fast-path: If chosen duration matches the initial parse, load immediately with ZERO redundant network re-upload!
+    if (cachedInitialBook && cachedInitialBook.targetMinutesPerSection === selectedMinutes) {
+      await saveBook(cachedInitialBook);
+      showToast(`Ready! "${cachedInitialBook.title}" split into ${cachedInitialBook.sections.length} sections.`, 'success');
+      setIsProcessing(false);
+      setExtractedData(null);
+      setCachedInitialBook(null);
+      onBookLoaded(cachedInitialBook);
+      return;
+    }
+
     setProgressStage(`Preparing ${selectedMinutes}-minute sections...`);
     setProgressPercent(70);
 
@@ -146,6 +160,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
       setIsProcessing(false);
       setExtractedData(null);
+      setCachedInitialBook(null);
       onBookLoaded(finalBook);
     } catch (err: any) {
       setErrorMessage(err.message || 'Could not finish sections.');

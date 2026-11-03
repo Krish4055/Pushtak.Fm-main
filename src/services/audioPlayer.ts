@@ -995,6 +995,71 @@ class AudioPlayerService {
 
     speakSentenceAt(startSentenceIndex);
   }
+
+  /**
+   * Export and download current section audio as a high-fidelity WAV file for offline listening
+   */
+  public async downloadCurrentSectionAudio(): Promise<{ success: boolean; filename?: string; error?: string }> {
+    if (!this.currentBook || !this.currentSection) {
+      return { success: false, error: 'No active chapter is currently selected.' };
+    }
+
+    try {
+      const book = this.currentBook;
+      const section = this.currentSection;
+      let blob: Blob | undefined = this.preloadedBlobs.get(section.id);
+
+      if (!blob) {
+        const cacheKey = await computeAudioCacheKey(
+          section.text,
+          this.voice,
+          book.language,
+          this.playbackRate
+        );
+        const cached = await getCachedAudioByKey(cacheKey);
+        if (cached) blob = cached.blob;
+      }
+
+      if (!blob) {
+        const resp = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: section.text,
+            language: book.language,
+            voice: this.voice,
+            speed: this.playbackRate,
+            sectionId: section.id,
+          }),
+        });
+
+        if (resp.ok) {
+          blob = await resp.blob();
+        } else {
+          return { success: false, error: 'Could not generate audio stream for download.' };
+        }
+      }
+
+      if (blob && typeof window !== 'undefined') {
+        const safeTitle = `${book.title} - ${section.title}`.replace(/[\\/:*?"<>|]/g, '_');
+        const filename = `${safeTitle}.wav`;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        return { success: true, filename };
+      }
+
+      return { success: false, error: 'Audio data unavailable.' };
+    } catch (err: any) {
+      console.error('[AudioPlayer] Audio download error:', err);
+      return { success: false, error: err.message || 'Download failed' };
+    }
+  }
 }
 
 export const audioPlayer = new AudioPlayerService();

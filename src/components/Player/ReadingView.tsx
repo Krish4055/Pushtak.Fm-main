@@ -45,6 +45,16 @@ export const ReadingView: React.FC<ReadingViewProps> = ({
     null
   );
 
+  // Auto-scroll the active sentence gently into view for seamless karaoke read-along
+  React.useEffect(() => {
+    if (currentSentenceIndex >= 0) {
+      const el = document.getElementById(`sentence-${currentSentenceIndex}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, [currentSentenceIndex]);
+
   const handleBookmark = async (sentence: SentenceItem) => {
     try {
       await saveNote({
