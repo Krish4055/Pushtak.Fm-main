@@ -11,6 +11,16 @@ import { chunkSection, retrieveRelevantChunks, BookChunk } from './server/servic
 import { getPreloadedDemoBook } from './server/data/demoBook.js';
 import { GNANI_CONFIG, isGnaniConfigured, isGeminiConfigured } from './server/config/gnani.js';
 import { getAvailableVoices, getDefaultVoiceId } from './server/services/voiceService.js';
+import {
+  initDatabase,
+  isDatabaseConnected,
+  saveBookToDB,
+  getBookFromDB,
+  saveBookChunksToDB,
+  getBookChunksFromDB,
+  saveStudyPackToDB,
+  getStudyPackFromDB,
+} from './server/db/postgres.js';
 
 dotenv.config();
 
@@ -90,6 +100,10 @@ app.get('/api/health', (req: Request, res: Response) => {
     status: 'ok',
     app: 'Pushtak.fm',
     models: {
+      database: {
+        engine: isDatabaseConnected() ? 'Render PostgreSQL' : 'In-Memory Storage',
+        connected: isDatabaseConnected(),
+      },
       tts: {
         engine: 'Gnani Timbre v3.0 (timbre-v3.0)',
         configured: isGnaniConfigured(),
@@ -245,8 +259,8 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     res.json(parsedBook);
     console.log(`[Upload] Book parsed: "${parsedBook.title}" - ${parsedBook.sections.length} sections, ${parsedBook.totalWords} words.`);
 
-    // Index chunks for RAG asynchronously in background without blocking response
-    setImmediate(() => {
+    // Index chunks for RAG and persist book in background
+    setImmediate(async () => {
       try {
         const bookChunks: BookChunk[] = [];
         for (const section of parsedBook.sections) {
@@ -254,9 +268,15 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
           bookChunks.push(...chunks);
         }
         bookChunksStore.set(parsedBook.id, bookChunks);
-        console.log(`[RAG Indexer] Indexed ${bookChunks.length} chunks for "${parsedBook.title}" (${parsedBook.id}) in background.`);
-      } catch (ragErr) {
-        console.error('[RAG Indexer] Background indexing error:', ragErr);
+        console.log(`[RAG Indexer] Indexed ${bookChunks.length} chunks for "${parsedBook.title}" (${parsedBook.id}) in memory.`);
+
+        if (isDatabaseConnected()) {
+          await saveBookToDB(parsedBook);
+          await saveBookChunksToDB(parsedBook.id, bookChunks);
+          console.log(`[Database] Persisted "${parsedBook.title}" (${bookChunks.length} chunks) to Render PostgreSQL.`);
+        }
+      } catch (err) {
+        console.error('[Upload] Background indexing/persistence error:', err);
       }
     });
   } catch (error: any) {
@@ -345,8 +365,20 @@ app.post('/api/ask', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Question is required.' });
     }
 
-    // Retrieve chunks for this book
+    // Retrieve chunks for this book from memory, or fall back to Render PostgreSQL
     let chunks = bookChunksStore.get(bookId) || [];
+
+    if (chunks.length === 0 && bookId && isDatabaseConnected()) {
+      try {
+        chunks = await getBookChunksFromDB(bookId);
+        if (chunks.length > 0) {
+          bookChunksStore.set(bookId, chunks);
+          console.log(`[Ask] Loaded ${chunks.length} chunks from Render PostgreSQL for book "${bookId}".`);
+        }
+      } catch (dbErr) {
+        console.warn('[Ask] Could not load chunks from DB:', dbErr);
+      }
+    }
 
     // Fallback: demo book chunks
     if (chunks.length === 0 && bookId === 'demo-deep-focus') {
@@ -379,10 +411,23 @@ app.post('/api/ask', async (req: Request, res: Response) => {
 // Student Study Pack (Recap, Quiz, Flashcards, Hinglish Explanation)
 const handleStudyPackRequest = async (req: Request, res: Response) => {
   try {
-    const { sectionTitle, sectionText, language } = req.body;
+    const { sectionId, bookId, sectionTitle, sectionText, language } = req.body;
 
     if (!sectionText) {
       return res.status(400).json({ error: 'Section text is required to generate study pack.' });
+    }
+
+    // Check if study pack already exists in PostgreSQL
+    if (sectionId && isDatabaseConnected()) {
+      try {
+        const cachedPack = await getStudyPackFromDB(sectionId);
+        if (cachedPack) {
+          console.log(`[Study Pack] Serving cached study pack from database for section ${sectionId}`);
+          return res.json(cachedPack);
+        }
+      } catch (dbErr) {
+        console.warn('[Study Pack] DB lookup error:', dbErr);
+      }
     }
 
     const studyPack = await generateStudentStudyPack({
@@ -390,6 +435,13 @@ const handleStudyPackRequest = async (req: Request, res: Response) => {
       sectionText,
       language,
     });
+
+    // Save to database asynchronously if connected
+    if (sectionId && isDatabaseConnected()) {
+      saveStudyPackToDB(sectionId, bookId || 'default', studyPack).catch((e) => {
+        console.warn('[Study Pack] Could not persist to DB:', e);
+      });
+    }
 
     res.json(studyPack);
   } catch (err: any) {
@@ -404,6 +456,9 @@ app.post('/api/student/study-pack', handleStudyPackRequest);
 
 // --- SERVER SETUP (Vite middleware in dev, dist in prod) ---
 async function startServer() {
+  // Initialize Render PostgreSQL (or fallback to in-memory mode if DATABASE_URL is not set)
+  await initDatabase();
+
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
@@ -423,6 +478,7 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Pushtak.fm] Server listening on http://0.0.0.0:${PORT}`);
     console.log(`[Pushtak.fm] Gnani AI Timbre v3.0 & Prisma v3.0 Configured: ${isGnaniConfigured() ? 'YES' : 'NO'}`);
+    console.log(`[Pushtak.fm] Database: ${isDatabaseConnected() ? 'Render PostgreSQL (Connected)' : 'In-Memory Mode (Active)'}`);
   });
 }
 

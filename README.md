@@ -211,6 +211,7 @@ Open your browser and navigate to `http://localhost:3000` to test the app!
 | :--- | :--- | :--- |
 | `GNANI_API_KEY` | **Recommended** | API Key from [Vachana / Gnani AI](https://vachana.ai/). Required for high-fidelity Timbre v3.0 TTS & Prisma STT. *(If absent, system automatically falls back to browser voice).* |
 | `GEMINI_API_KEY` | **Recommended** | API Key from [Google AI Studio](https://aistudio.google.com/). Required for "Ask the Book" RAG and Student Study Packs. |
+| `DATABASE_URL` | Optional | PostgreSQL connection string (e.g. from Render Managed PostgreSQL). If omitted, the server automatically runs in in-memory storage mode. |
 | `PORT` | Optional | Server port (Default: `3000`). |
 | `APP_URL` | Optional | Canonical URL where the app is hosted (e.g. `http://localhost:3000` or production domain). |
 | `GNANI_TTS_ENDPOINT`| Optional | Custom override for Timbre TTS (Default: `https://api.vachana.ai/api/v1/tts/inference`). |
@@ -367,12 +368,18 @@ Ensure your repository is pushed to GitHub (make sure `.env` is **not** committe
   ```
 - **Instance Type**: Select **Free** ($0/month).
 
-#### Step 4: Add Environment Variables
+#### Step 4: Add Environment Variables & Database
 In the Render dashboard under **Environment Variables**, add:
 - `GNANI_API_KEY` = *(your Vachana/Gnani API key)*
 - `GEMINI_API_KEY` = *(your Google AI Studio key)*
 - `NODE_ENV` = `production`
 - `PORT` = `3000`
+
+*(Optional but Recommended)* **Attach Free Render PostgreSQL**:
+1. In Render Dashboard, click **New +** $\rightarrow$ **PostgreSQL**.
+2. Name: `pushtak-db`, Plan: **Free**, click **Create Database**.
+3. Under your Web Service **Environment**, add `DATABASE_URL` and paste the **Internal Database URL** (or link the database directly).
+4. Pushtak.fm will auto-create all database tables on startup!
 
 #### Step 5: Deploy!
 Click **Create Web Service**. Render will install dependencies, build the Vite production bundle, start the Express server, and provide a free `https://pushtak-fm.onrender.com` domain with automatic SSL (required for PWA and Media Session APIs).
@@ -404,6 +411,8 @@ Pushtak.fm/
 │   │   └── voices.config.ts# Narrator voice profiles
 │   ├── data/
 │   │   └── demoBook.ts     # Preloaded demo book content
+│   ├── db/
+│   │   └── postgres.ts     # Render PostgreSQL adapter & schema auto-migrator
 │   └── services/
 │       ├── bookParser.ts   # PDF/DOCX/TXT extraction & chunking
 │       ├── llmService.ts   # Gemini 2.5 Flash RAG & Study Pack generator
